@@ -1,0 +1,11 @@
+[build]
+  base    = "web"
+  command = "npm run build"
+  publish = "dist"
+
+[[headers]]
+  for = "/catalogue.json.gz"
+  [headers.values]
+    Content-Encoding = "gzip"
+    Content-Type     = "application/json"
+    Cache-Control    = "public, max-age=86400"

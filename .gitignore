@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+dash_app/.venv
+
+# Node
+node_modules/
+web/node_modules/
+web/dist/
