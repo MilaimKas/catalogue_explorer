@@ -82,4 +82,4 @@ uv run python app.py
 
 ## Live app
 
-
+The can is deployed on netifly: [icd-ops-catalogue-explorer](https://icd-ops-catalogue-explorer.netlify.app/)
