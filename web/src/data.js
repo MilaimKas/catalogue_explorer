@@ -21,34 +21,31 @@ export const KIND_COLOURS = {
   category: "#e8a84a",
 };
 
-// ── Catalogue loading ──────────────────────────────────────────────────────────
+// ── Catalogue / transitions loading ───────────────────────────────────────────
 
 /**
- * Fetch and parse the catalogue.
+ * Fetch a gzipped JSON resource, transparently handling both deployment modes.
  *
- * Reads the first two bytes to detect the gzip magic number (0x1f 0x8b).
- * - If present  → decompress manually via DecompressionStream (Vite dev server)
- * - If absent   → the browser already decoded it via Content-Encoding (Netlify prod)
+ * The first two bytes are inspected for the gzip magic number (0x1f 0x8b):
+ *   - present → the server delivered raw bytes (Vite dev server) → manual decompress
+ *   - absent  → the browser already decoded via Content-Encoding: gzip (Netlify prod)
  *
- * @returns {Promise<Array>}
+ * @param {string} url
+ * @returns {Promise<any>}
  */
-export async function loadCatalogue() {
-  const response = await fetch("/catalogue.json.gz");
-  if (!response.ok) throw new Error(`Failed to load catalogue: ${response.status}`);
+async function fetchGzippedJson(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to load ${url}: ${response.status}`);
 
   const buffer = await response.arrayBuffer();
   const bytes  = new Uint8Array(buffer);
-
-  // Gzip magic number: 0x1f 0x8b
   const isGzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
 
   if (!isGzip) {
-    // Already decompressed by the browser (Content-Encoding: gzip on Netlify)
     return JSON.parse(new TextDecoder().decode(bytes));
   }
 
-  // Manual decompression (Vite dev server serves raw bytes)
-  const ds = new DecompressionStream("gzip");
+  const ds     = new DecompressionStream("gzip");
   const writer = ds.writable.getWriter();
   writer.write(buffer);
   writer.close();
@@ -67,6 +64,16 @@ export async function loadCatalogue() {
   for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
 
   return JSON.parse(new TextDecoder().decode(merged));
+}
+
+/** Fetch and parse the catalogue records. @returns {Promise<Array>} */
+export function loadCatalogue() {
+  return fetchGzippedJson("/catalogue.json.gz");
+}
+
+/** Fetch and parse the Umsteiger transition records. @returns {Promise<Array>} */
+export function loadTransitions() {
+  return fetchGzippedJson("/transitions.json.gz");
 }
 
 // ── Year-span computation ──────────────────────────────────────────────────────

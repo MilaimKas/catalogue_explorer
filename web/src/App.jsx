@@ -10,12 +10,19 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Cytoscape from "cytoscape";
 import {
   loadCatalogue,
+  loadTransitions,
   buildYearSpan,
   buildElements,
   buildSearchElements,
   MIN_YEAR,
   MAX_YEAR,
 } from "./data.js";
+import {
+  buildTransitionIndex,
+  computeLifespan,
+  headlineTag,
+  computeNeighbourhood,
+} from "./transitions.js";
 
 // ── Cytoscape stylesheet (mirrors dash_app/layout.py CYTO_STYLESHEET) ─────────
 
@@ -85,14 +92,59 @@ function Field({ label, value }) {
   );
 }
 
+/**
+ * Horizontal year-by-year status strip.
+ *
+ * One cell per year in [firstYear..lastYear]. Cell colour encodes status:
+ *   stable    → dark green       (code exists, all edges auto)
+ *   ambiguous → yellow           (semantic shift / split / merge)
+ *   absent    → light gray       (code not present this year)
+ *
+ * `bornYear` gets an orange bottom border; `diedYear` a red bottom border.
+ * `currentYear` (the year currently viewed) gets a white outline.
+ */
+function LifespanStrip({ statusByYear, bornYear, diedYear, currentYear, firstYear, lastYear }) {
+  const cellColours = { stable: "#2a6b32", ambiguous: "#d4a017", absent: "#3a3a3a" };
+  const years       = [];
+  for (let y = firstYear; y <= lastYear; y++) years.push(y);
+
+  return (
+    <div style={{ display: "flex", gap: 2, marginTop: 4, marginBottom: 2 }}>
+      {years.map(y => {
+        const status = statusByYear[y] ?? "absent";
+        const isBorn = y === bornYear;
+        const isDied = y === diedYear;
+        const isCurrent = y === currentYear;
+        return (
+          <div
+            key={y}
+            title={`${y}: ${status}${isBorn ? " (born)" : ""}${isDied ? " (ended)" : ""}`}
+            style={{
+              flex: 1, height: 18,
+              background: cellColours[status],
+              borderBottom:
+                isBorn ? "3px solid #e67e22" :
+                isDied ? "3px solid #c0392b" : "none",
+              outline: isCurrent ? "2px solid #fff" : "none",
+              outlineOffset: isCurrent ? -2 : 0,
+              borderRadius: 2,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function App() {
   // ── Data ──────────────────────────────────────────────────────────────────
-  const [records,  setRecords]  = useState(null);
-  const [yearSpan, setYearSpan] = useState(null);
-  const [loading,  setLoading]  = useState(true);
-  const [loadErr,  setLoadErr]  = useState(null);
+  const [records,    setRecords]    = useState(null);
+  const [yearSpan,   setYearSpan]   = useState(null);
+  const [transIndex, setTransIndex] = useState(null);   // built from transitions.json.gz
+  const [loading,    setLoading]    = useState(true);
+  const [loadErr,    setLoadErr]    = useState(null);
 
   // ── Filter state ──────────────────────────────────────────────────────────
   const [year,         setYear]         = useState(MAX_YEAR);
@@ -114,6 +166,9 @@ export default function App() {
 
   // Welcome screen: hidden once the user clicks "Explore" or starts searching
   const [exploring, setExploring] = useState(false);
+
+  // Side panel: legend for the Lifespan section (collapsed by default)
+  const [showLifespanHelp, setShowLifespanHelp] = useState(false);
 
   // ── Cytoscape ref (imperatively managed to avoid canvas remounting) ───────
   // cyRef is a callback ref: Cytoscape is created as soon as the DOM node exists.
@@ -141,7 +196,10 @@ export default function App() {
     });
   }, []); // stable: no deps, created once
 
-  // ── Load catalogue on mount ───────────────────────────────────────────────
+  // ── Load catalogue + transitions on mount ─────────────────────────────────
+  // Catalogue is required to render the graph; transitions are only needed for
+  // the side panel. We kick off both in parallel but only block the initial
+  // render on the catalogue. Transitions populate the panel when ready.
   useEffect(() => {
     loadCatalogue()
       .then(recs => {
@@ -153,6 +211,10 @@ export default function App() {
         setLoadErr(err.message);
         setLoading(false);
       });
+
+    loadTransitions()
+      .then(rows => setTransIndex(buildTransitionIndex(rows)))
+      .catch(err => console.warn("Transitions unavailable:", err.message));
   }, []);
 
   // ── Debounce search inputs ────────────────────────────────────────────────
@@ -243,32 +305,165 @@ export default function App() {
   const nodeDetails = useCallback(() => {
     if (!selectedNode || !yearSpan) return <span>Click a node to see details.</span>;
 
-    const span    = yearSpan.get(selectedNode);
-    const spanStr = span
-      ? (span.firstYear !== span.lastYear
-          ? `${span.firstYear}–${span.lastYear}`
-          : String(span.firstYear))
-      : "—";
-
-    const cyNode  = cyInstance.current?.getElementById(selectedNode);
-    const kind    = cyNode?.data("kind")       ?? "—";
-    const isLeaf  = cyNode?.data("is_leaf")    ?? false;
-    const label   = cyNode?.data("full_label") ?? "—";
+    const span   = yearSpan.get(selectedNode);
+    const cyNode = cyInstance.current?.getElementById(selectedNode);
+    const kind   = cyNode?.data("kind")       ?? "—";
+    const isLeaf = cyNode?.data("is_leaf")    ?? false;
+    const label  = cyNode?.data("full_label") ?? "—";
 
     const inSearchMode = query.trim().length > 0;
     const isExpanded   = expandedNodes.has(selectedNode);
+    const cat          = span?.catalogue;
+
+    // Compute transition info (undefined if index not yet loaded)
+    let tag = null, lifespan = null, nbhd = null;
+    if (transIndex && cat) {
+      lifespan = computeLifespan(transIndex, cat, selectedNode);
+      tag      = headlineTag(lifespan);
+      nbhd     = computeNeighbourhood(transIndex, cat, selectedNode, year);
+    }
 
     return (
       <>
-        <Field label="Code"        value={selectedNode} />
-        <Field label="Catalogue"   value={span?.catalogue ?? "—"} />
-        <Field label="Kind"        value={kind} />
-        <Field label="Leaf"        value={isLeaf ? "Yes" : "No"} />
-        <Field label="Valid years" value={spanStr} />
+        <Field label="Code"      value={selectedNode} />
+        <Field label="Catalogue" value={cat ?? "—"} />
+        <Field label="Kind"      value={kind} />
+        <Field label="Leaf"      value={isLeaf ? "Yes" : "No"} />
         <div style={{ marginTop: 6 }}>
           <span style={{ color: "#888", fontSize: 11 }}>Label: </span>
           <span style={{ color: "#eee", fontStyle: "italic", fontSize: 12 }}>{label}</span>
         </div>
+
+        {/* ── Transition info ── */}
+        <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid #2a2a2a" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+            <span style={{ color: "#888", fontSize: 11 }}>Lifespan</span>
+            <button
+              onClick={() => setShowLifespanHelp(s => !s)}
+              title={showLifespanHelp ? "Hide legend" : "What does this mean?"}
+              style={{
+                width: 16, height: 16, lineHeight: "14px", textAlign: "center",
+                padding: 0, borderRadius: "50%",
+                border: "1px solid #555", background: showLifespanHelp ? "#444" : "transparent",
+                color: "#aaa", fontSize: 10, cursor: "pointer",
+              }}
+            >
+              ?
+            </button>
+          </div>
+
+          {showLifespanHelp && (
+            <div style={{
+              marginBottom: 10, padding: "8px 10px",
+              background: "#0f0f0f", border: "1px solid #2a2a2a",
+              borderRadius: 4, fontSize: 11, color: "#bbb", lineHeight: 1.5,
+            }}>
+              <div style={{ marginBottom: 6 }}>
+                Derived from the BfArM <i>Umsteiger</i> year-to-year mapping tables.
+              </div>
+
+              <div style={{ marginBottom: 4, color: "#ddd", fontWeight: 600 }}>Headline</div>
+              <div style={{ marginBottom: 8 }}>
+                One-line summary: stable range, introduction year, deprecation year, or
+                years where the mapping was non-automatic (split / merge / semantic shift).
+              </div>
+
+              <div style={{ marginBottom: 4, color: "#ddd", fontWeight: 600 }}>Strip</div>
+              <div style={{ marginBottom: 4 }}>One cell per year:</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                <span><span style={{ display: "inline-block", width: 12, height: 10, background: "#2a6b32", verticalAlign: "middle", marginRight: 4 }} />stable</span>
+                <span><span style={{ display: "inline-block", width: 12, height: 10, background: "#d4a017", verticalAlign: "middle", marginRight: 4 }} />non-auto</span>
+                <span><span style={{ display: "inline-block", width: 12, height: 10, background: "#3a3a3a", verticalAlign: "middle", marginRight: 4 }} />absent</span>
+              </div>
+              <div style={{ marginBottom: 2 }}>
+                <span style={{ display: "inline-block", width: 12, height: 10, borderBottom: "3px solid #e67e22", verticalAlign: "middle", marginRight: 4 }} />
+                born (first appearance)
+              </div>
+              <div style={{ marginBottom: 2 }}>
+                <span style={{ display: "inline-block", width: 12, height: 10, borderBottom: "3px solid #c0392b", verticalAlign: "middle", marginRight: 4 }} />
+                ended (last appearance)
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                <span style={{ display: "inline-block", width: 12, height: 10, outline: "2px solid #fff", outlineOffset: -2, verticalAlign: "middle", marginRight: 6 }} />
+                current year viewed
+              </div>
+
+              <div style={{ marginBottom: 4, color: "#ddd", fontWeight: 600 }}>Neighbourhood</div>
+              <div>
+                Single-step mapping at the viewed year: which code(s) this code
+                comes from (← previous year) and maps to (→ next year).
+                <span style={{ color: "#2ecc71" }}> ✓ auto</span> means unambiguous;
+                <span style={{ color: "#e67e22" }}> ✗ ambiguous</span> means the mapping involves a split, merge, or semantic shift.
+              </div>
+            </div>
+          )}
+
+          {!transIndex && (
+            <div style={{ color: "#666", fontSize: 11, fontStyle: "italic" }}>
+              Loading transitions…
+            </div>
+          )}
+
+          {transIndex && lifespan && lifespan.yearsPresent.length === 0 && (
+            <div style={{ color: "#666", fontSize: 11, fontStyle: "italic" }}>
+              No transition data for this code.
+            </div>
+          )}
+
+          {transIndex && lifespan && lifespan.yearsPresent.length > 0 && (
+            <>
+              {/* 1. Headline tag */}
+              <div style={{ color: "#ddd", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                {tag}
+              </div>
+
+              {/* 2. Lifespan strip */}
+              <LifespanStrip
+                statusByYear={lifespan.statusByYear}
+                bornYear={lifespan.bornYear}
+                diedYear={lifespan.diedYear}
+                currentYear={year}
+                firstYear={lifespan.yearsPresent[0]}
+                lastYear={lifespan.yearsPresent[lifespan.yearsPresent.length - 1]}
+              />
+
+              {/* 3. Year-Y neighbourhood */}
+              {nbhd && (
+                <div style={{ marginTop: 10, fontSize: 11, fontFamily: "monospace", color: "#ccc" }}>
+                  <div>
+                    ← from {year - 1}: {nbhd.prev.length === 0 ? (
+                      <span style={{ color: "#666" }}>—</span>
+                    ) : nbhd.prev.length === 1 ? (
+                      <>
+                        <span style={{ color: "#eee" }}>{nbhd.prev[0].code}</span>
+                        <span style={{ color: nbhd.prev[0].auto ? "#2ecc71" : "#e67e22", marginLeft: 6 }}>
+                          {nbhd.prev[0].auto ? "✓ auto" : "✗ ambiguous"}
+                        </span>
+                      </>
+                    ) : (
+                      <span style={{ color: "#e67e22" }}>{nbhd.prev.length} codes</span>
+                    )}
+                  </div>
+                  <div>
+                    → to   {year + 1}: {nbhd.next.length === 0 ? (
+                      <span style={{ color: "#666" }}>—</span>
+                    ) : nbhd.next.length === 1 ? (
+                      <>
+                        <span style={{ color: "#eee" }}>{nbhd.next[0].code}</span>
+                        <span style={{ color: nbhd.next[0].auto ? "#2ecc71" : "#e67e22", marginLeft: 6 }}>
+                          {nbhd.next[0].auto ? "✓ auto" : "✗ ambiguous"}
+                        </span>
+                      </>
+                    ) : (
+                      <span style={{ color: "#e67e22" }}>{nbhd.next.length} codes</span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
         {!inSearchMode && !isLeaf && (
           <button
             onClick={toggleExpand}
@@ -284,7 +479,7 @@ export default function App() {
         )}
       </>
     );
-  }, [selectedNode, yearSpan, query, expandedNodes, toggleExpand]);
+  }, [selectedNode, yearSpan, query, expandedNodes, toggleExpand, transIndex, year, showLifespanHelp]);
 
   // ── Shared style helpers ──────────────────────────────────────────────────
   const btnStyle = (bg) => ({
@@ -326,6 +521,20 @@ export default function App() {
           ICD-10-GM / OPS Catalogue Explorer
         </h2>
         <span style={{ color: "#666", fontSize: 13 }}>Interactive code hierarchy viewer</span>
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={() => setExploring(false)}
+          title="Show the welcome screen"
+          style={{
+            padding: "5px 12px",
+            background: "transparent",
+            border: "1px solid #444",
+            borderRadius: 4,
+            color: "#aaa", cursor: "pointer", fontSize: 12,
+          }}
+        >
+          Guide
+        </button>
       </div>
 
       {/* Toolbar */}
@@ -393,44 +602,79 @@ export default function App() {
           {!exploring && (
             <div style={{
               position: "absolute", inset: 0,
-              background: "#121212",
+              background: "radial-gradient(ellipse at center, #1a1a1a 0%, #0e0e0e 100%)",
               display: "flex", alignItems: "center", justifyContent: "center",
-              padding: 32,
+              padding: 32, overflowY: "auto",
             }}>
-              <div style={{ maxWidth: 560, color: "#ddd", lineHeight: 1.6, fontSize: 14 }}>
-                <h3 style={{ color: "#eee", margin: "0 0 12px 0", fontSize: 18 }}>
+              <div style={{
+                maxWidth: 600, width: "100%",
+                background: "#181818",
+                border: "1px solid #2a2a2a",
+                borderRadius: 10,
+                padding: "32px 36px",
+                boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
+                color: "#ddd", lineHeight: 1.65, fontSize: 14,
+              }}>
+                {/* Accent bar + heading */}
+                <div style={{
+                  width: 48, height: 3, background: "#4a90d9",
+                  borderRadius: 2, marginBottom: 16,
+                }} />
+                <h2 style={{
+                  color: "#f0f0f0", margin: "0 0 8px 0",
+                  fontSize: 22, fontWeight: 600, letterSpacing: "-0.3px",
+                }}>
                   Welcome
-                </h3>
-                <p style={{ margin: "0 0 12px 0" }}>
-                  This tool visualises the German <b>ICD-10-GM</b> (diagnoses) and
-                  <b> OPS</b> (procedures) code hierarchies as interactive networks.
+                </h2>
+                <p style={{ margin: "0 0 20px 0", color: "#aaa", fontSize: 13 }}>
+                  Interactive explorer for German clinical code hierarchies.
                 </p>
-                <p style={{ margin: "0 0 12px 0", color: "#aaa" }}>How to use it:</p>
-                <ul style={{ margin: "0 0 16px 20px", color: "#ccc" }}>
-                  <li>Pick a <b>catalogue</b> (ICD-10-GM or OPS) and a <b>year</b> in the toolbar.</li>
-                  <li>
-                    <b>Browse</b> the hierarchy by clicking a node to select it,
-                    then using <b>Expand</b> in the side panel to drill down.
+
+                <p style={{ margin: "0 0 18px 0" }}>
+                  This tool visualises the German <b>ICD-10-GM</b> (diagnoses) and
+                  <b> OPS</b> (procedures) code hierarchies as interactive networks,
+                  with year-to-year transition information from the BfArM{" "}
+                  <i>Umsteiger</i> tables.
+                </p>
+
+                <div style={{ borderTop: "1px solid #2a2a2a", margin: "20px 0" }} />
+
+                <div style={{ color: "#aaa", fontSize: 12, textTransform: "uppercase",
+                               letterSpacing: 1, marginBottom: 10 }}>
+                  How to use it
+                </div>
+                <ul style={{ margin: "0 0 24px 0", paddingLeft: 20, color: "#ccc" }}>
+                  <li style={{ marginBottom: 6 }}>
+                    Pick a <b>catalogue</b> and a <b>year</b> in the toolbar.
+                  </li>
+                  <li style={{ marginBottom: 6 }}>
+                    <b>Browse</b> by clicking a node, then <b>Expand</b> it from the
+                    side panel to drill down.
+                  </li>
+                  <li style={{ marginBottom: 6 }}>
+                    <b>Search</b> by label or code prefix — comma-separated terms (OR);
+                    the <i>Exclude</i> field filters matches out.
                   </li>
                   <li>
-                    <b>Search</b> by label or code prefix. Multiple terms are
-                    comma-separated (OR). The <i>Exclude</i> field removes matches.
-                  </li>
-                  <li>
-                    Build a <b>feature group</b> by adding selected codes to a named
-                    list, then copy it as a Python list.
+                    Build a <b>feature group</b> from selected codes and copy it as a
+                    Python list.
                   </li>
                 </ul>
+
                 <button
                   onClick={() => setExploring(true)}
                   style={{
-                    padding: "10px 22px", background: "#4a90d9", border: "none",
-                    borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 14,
+                    padding: "11px 24px",
+                    background: "linear-gradient(180deg, #5aa0e0 0%, #4a90d9 100%)",
+                    border: "none", borderRadius: 6,
+                    color: "#fff", cursor: "pointer",
+                    fontSize: 14, fontWeight: 500,
+                    boxShadow: "0 2px 8px rgba(74,144,217,0.3)",
                   }}
                 >
-                  Explore {catalogue === "ICD" ? "ICD-10-GM" : "OPS"} ({year})
+                  Explore {catalogue === "ICD" ? "ICD-10-GM" : "OPS"} ({year}) →
                 </button>
-                <p style={{ margin: "16px 0 0 0", fontSize: 12, color: "#666" }}>
+                <p style={{ margin: "14px 0 0 0", fontSize: 12, color: "#666" }}>
                   Tip: typing in the search field also opens the graph.
                 </p>
               </div>
