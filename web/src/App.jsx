@@ -112,6 +112,9 @@ export default function App() {
   const [groupName,     setGroupName]     = useState("my_group");
   const [copyFeedback,  setCopyFeedback]  = useState("");
 
+  // Welcome screen: hidden once the user clicks "Explore" or starts searching
+  const [exploring, setExploring] = useState(false);
+
   // ── Cytoscape ref (imperatively managed to avoid canvas remounting) ───────
   // cyRef is a callback ref: Cytoscape is created as soon as the DOM node exists.
   const cyInstance = useRef(null);
@@ -157,6 +160,7 @@ export default function App() {
     const id = setTimeout(() => {
       setQuery(searchInput);
       setExpandedNodes(new Set()); // reset expansion on new search
+      if (searchInput.trim()) setExploring(true); // a query dismisses the welcome
     }, 400);
     return () => clearTimeout(id);
   }, [searchInput]);
@@ -172,12 +176,12 @@ export default function App() {
   // ── Rebuild graph elements whenever relevant state changes ────────────────
   useEffect(() => {
     const cy = cyInstance.current;
-    if (!records || !cy) return;
+    if (!records || !cy || !exploring) return;
 
     const includeTerms = query.split(",").map(t => t.trim()).filter(Boolean);
     let elements = includeTerms.length > 0
       ? buildSearchElements(records, year, catalogue, query, searchMode, exclude || null)
-      : buildElements(records, year, catalogue, null, 1, expandedNodes);
+      : buildElements(records, year, catalogue, null, expandedNodes);
 
     const layout = includeTerms.length > 0
       ? { name: "cose", animate: false, nodeRepulsion: 8000, idealEdgeLength: 80 }
@@ -188,7 +192,7 @@ export default function App() {
       cy.add(elements);
     });
     cy.layout(layout).run();
-  }, [records, year, catalogue, query, exclude, searchMode, expandedNodes]);
+  }, [records, year, catalogue, query, exclude, searchMode, expandedNodes, exploring]);
 
   // ── Sync in-group class directly on Cytoscape nodes (no graph rebuild) ────
   // Kept in a separate effect so that feature group changes never retrigger
@@ -385,17 +389,67 @@ export default function App() {
         <div style={{ flex: 1, position: "relative" }}>
           <div ref={cyRef} style={{ width: "100%", height: "100%" }} />
 
-          {/* Floating legend */}
-          <div style={{ position: "absolute", bottom: 12, left: 12,
-                        background: "rgba(30,30,30,0.85)", padding: "8px 12px",
-                        borderRadius: 6, fontSize: 11, color: "#ccc" }}>
-            <div style={{ fontWeight: "bold", marginBottom: 4 }}>Node types:</div>
-            <div><span style={{ color: "#4a90d9" }}>■ </span>Chapter</div>
-            <div><span style={{ color: "#7cb87e" }}>■ </span>Block</div>
-            <div><span style={{ color: "#e8a84a" }}>■ </span>Category</div>
-            <hr style={{ borderColor: "#444", margin: "6px 0" }} />
-            <div><span style={{ color: "#f1c40f" }}>◈ </span>Search match</div>
-          </div>
+          {/* Welcome overlay: shown until the user clicks Explore or enters a query */}
+          {!exploring && (
+            <div style={{
+              position: "absolute", inset: 0,
+              background: "#121212",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              padding: 32,
+            }}>
+              <div style={{ maxWidth: 560, color: "#ddd", lineHeight: 1.6, fontSize: 14 }}>
+                <h3 style={{ color: "#eee", margin: "0 0 12px 0", fontSize: 18 }}>
+                  Welcome
+                </h3>
+                <p style={{ margin: "0 0 12px 0" }}>
+                  This tool visualises the German <b>ICD-10-GM</b> (diagnoses) and
+                  <b> OPS</b> (procedures) code hierarchies as interactive networks.
+                </p>
+                <p style={{ margin: "0 0 12px 0", color: "#aaa" }}>How to use it:</p>
+                <ul style={{ margin: "0 0 16px 20px", color: "#ccc" }}>
+                  <li>Pick a <b>catalogue</b> (ICD-10-GM or OPS) and a <b>year</b> in the toolbar.</li>
+                  <li>
+                    <b>Browse</b> the hierarchy by clicking a node to select it,
+                    then using <b>Expand</b> in the side panel to drill down.
+                  </li>
+                  <li>
+                    <b>Search</b> by label or code prefix. Multiple terms are
+                    comma-separated (OR). The <i>Exclude</i> field removes matches.
+                  </li>
+                  <li>
+                    Build a <b>feature group</b> by adding selected codes to a named
+                    list, then copy it as a Python list.
+                  </li>
+                </ul>
+                <button
+                  onClick={() => setExploring(true)}
+                  style={{
+                    padding: "10px 22px", background: "#4a90d9", border: "none",
+                    borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 14,
+                  }}
+                >
+                  Explore {catalogue === "ICD" ? "ICD-10-GM" : "OPS"} ({year})
+                </button>
+                <p style={{ margin: "16px 0 0 0", fontSize: 12, color: "#666" }}>
+                  Tip: typing in the search field also opens the graph.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Floating legend (hidden until the graph is shown) */}
+          {exploring && (
+            <div style={{ position: "absolute", bottom: 12, left: 12,
+                          background: "rgba(30,30,30,0.85)", padding: "8px 12px",
+                          borderRadius: 6, fontSize: 11, color: "#ccc" }}>
+              <div style={{ fontWeight: "bold", marginBottom: 4 }}>Node types:</div>
+              <div><span style={{ color: "#4a90d9" }}>■ </span>Chapter</div>
+              <div><span style={{ color: "#7cb87e" }}>■ </span>Block</div>
+              <div><span style={{ color: "#e8a84a" }}>■ </span>Category</div>
+              <hr style={{ borderColor: "#444", margin: "6px 0" }} />
+              <div><span style={{ color: "#f1c40f" }}>◈ </span>Search match</div>
+            </div>
+          )}
         </div>
 
         {/* Side panel */}

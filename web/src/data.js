@@ -154,23 +154,25 @@ function makeNode(row, expandedSet) {
 
 /**
  * Build cytoscape elements for the hierarchy browse view.
- * BFS from top-level roots up to `maxDepth` levels.
- * Nodes in `expandedNodes` get one extra level of depth (click-to-expand).
  *
- * @param {Array}       records
- * @param {number}      year
- * @param {string}      catalogueType
- * @param {string[]|null} rootCodes     null = top-level chapters
- * @param {number}      maxDepth
- * @param {Set<string>} expandedNodes
- * @returns {object[]}  cytoscape element list
+ * Visibility rules:
+ *   - Root nodes are always visible
+ *   - A non-root node is visible iff its parent is in `expandedNodes`
+ *
+ * That is, "expanding" node X reveals X's direct children — nothing more.
+ *
+ * @param {Array}         records
+ * @param {number}        year
+ * @param {string}        catalogueType
+ * @param {string[]|null} rootCodes      null = top-level chapters
+ * @param {Set<string>}   expandedNodes
+ * @returns {object[]}    cytoscape element list
  */
 export function buildElements(
   records,
   year,
   catalogueType,
   rootCodes = null,
-  maxDepth = 1,
   expandedNodes = new Set(),
 ) {
   const { childrenMap, codeRow } = buildLookups(records, year, catalogueType);
@@ -180,54 +182,29 @@ export function buildElements(
     ? rootCodes.filter(c => codeRow.has(c))
     : (childrenMap.get(null) ?? []);
 
-  const visited   = new Set();
-  const seenEdges = new Set();
-  const elements  = [];
-
-  // Queue items: [code, depth, depthLimit]
-  const queue = roots.map(c => [c, 0, maxDepth]);
-
+  // BFS from roots, descending only through expanded nodes
+  const visited = new Set(roots);
+  const queue   = [...roots];
   while (queue.length > 0) {
-    const [code, depth, limit] = queue.shift();
-    if (visited.has(code)) continue;
-    visited.add(code);
-
-    const row = codeRow.get(code);
-    if (!row) continue;
-
-    elements.push(makeNode(row, expandedNodes));
-
-    const parent = row.parent || null;
-    if (parent && visited.has(parent)) {
-      const edgeId = `${parent}->${code}`;
-      if (!seenEdges.has(edgeId)) {
-        seenEdges.add(edgeId);
-        elements.push({ data: { source: parent, target: code, id: edgeId } });
-      }
-    }
-
-    if (depth < limit) {
-      // Expanded nodes grant their children an extra level
-      const childLimit = expandedNodes.has(code) ? limit + 1 : limit;
-      for (const child of childrenMap.get(code) ?? []) {
-        if (!visited.has(child)) queue.push([child, depth + 1, childLimit]);
+    const code = queue.shift();
+    if (!expandedNodes.has(code)) continue;
+    for (const child of childrenMap.get(code) ?? []) {
+      if (!visited.has(child)) {
+        visited.add(child);
+        queue.push(child);
       }
     }
   }
 
-  // Second pass: add any missing edges to already-visited parents
-  const visitedSet = new Set(
-    elements.filter(el => !el.data.source).map(el => el.data.id)
-  );
-  for (const el of [...elements]) {
-    if (el.data.source) continue;
-    const parent = el.data.parent_code;
-    if (parent && visitedSet.has(parent)) {
-      const edgeId = `${parent}->${el.data.id}`;
-      if (!seenEdges.has(edgeId)) {
-        seenEdges.add(edgeId);
-        elements.push({ data: { source: parent, target: el.data.id, id: edgeId } });
-      }
+  // Materialise nodes and the single parent edge per node (tree: one parent max)
+  const elements = [];
+  for (const code of visited) {
+    const row = codeRow.get(code);
+    if (!row) continue;
+    elements.push(makeNode(row, expandedNodes));
+    const parent = row.parent || null;
+    if (parent && visited.has(parent)) {
+      elements.push({ data: { source: parent, target: code, id: `${parent}->${code}` } });
     }
   }
 
